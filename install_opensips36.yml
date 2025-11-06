@@ -1,0 +1,64 @@
+---
+- name: Install OpenSIPS 3.6 and OpenSIPS-CLI
+  hosts: all
+  become: yes
+  vars:
+    opensips_repo_key: "https://apt.opensips.org/opensips-org.gpg"
+    opensips_keyring_path: "/usr/share/keyrings/opensips-org.gpg"
+    opensips_repo_line: "deb [signed-by={{ opensips_keyring_path }}] https://apt.opensips.org bookworm 3.6-releases"
+    opensips_cli_repo_line: "deb [signed-by={{ opensips_keyring_path }}] https://apt.opensips.org bookworm cli-nightly"
+    opensips_repo_file: "/etc/apt/sources.list.d/opensips.list"
+    opensips_cli_repo_file: "/etc/apt/sources.list.d/opensips-cli.list"
+
+  tasks:
+    - name: Download OpenSIPS repository GPG key
+      ansible.builtin.get_url:
+        url: "{{ opensips_repo_key }}"
+        dest: "{{ opensips_keyring_path }}"
+        mode: '0644'
+      register: key_download
+
+    - name: Add OpenSIPS 3.6 repository
+      ansible.builtin.lineinfile:
+        path: "{{ opensips_repo_file }}"
+        line: "{{ opensips_repo_line }}"
+        create: yes
+      when: key_download is succeeded
+
+    - name: Add OpenSIPS-CLI repository
+      ansible.builtin.lineinfile:
+        path: "{{ opensips_cli_repo_file }}"
+        line: "{{ opensips_cli_repo_line }}"
+        create: yes
+      when: key_download is succeeded
+
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install OpenSIPS 3.6
+      ansible.builtin.apt:
+        name: opensips
+        state: present
+
+    - name: Install OpenSIPS-CLI
+      ansible.builtin.apt:
+        name: opensips-cli
+        state: present
+
+    - name: Ensure OpenSIPS service is started and enabled
+      ansible.builtin.systemd:
+        name: opensips
+        enabled: yes
+        state: started
+      ignore_errors: yes
+
+    - name: Verify OpenSIPS version
+      ansible.builtin.command: opensips -V
+      register: opensips_version
+      changed_when: false
+
+    - name: Display OpenSIPS version
+      ansible.builtin.debug:
+        var: opensips_version.stdout
+
