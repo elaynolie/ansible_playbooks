@@ -1,0 +1,90 @@
+---
+- name: Install PostgreSQL 18 on Debian 12 (with old version removal)
+  hosts: localhost
+  become: yes
+  gather_facts: yes
+
+  vars:
+    postgresql_version: "18"
+    pgdg_key_url: "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+    pgdg_key_path: "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+    pgdg_list_path: "/etc/apt/sources.list.d/pgdg.list"
+
+  tasks:
+    - name: Check for installed old PostgreSQL packages (≤17)
+      ansible.builtin.shell: |
+        dpkg -l | grep '^ii' | grep -E 'postgresql-(1[0-7]|[0-9])' | awk '{print $2}' || true
+      register: old_packages
+      changed_when: false
+
+    - name: Uninstall old PostgreSQL packages if found
+      ansible.builtin.apt:
+        name: "{{ old_packages.stdout_lines }}"
+        state: absent
+        purge: yes
+      when: old_packages.stdout_lines | length > 0
+      notify: Stop and disable postgresql service (if running)
+
+    - name: Ensure required packages are installed (curl, ca-certificates)
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: yes
+
+    - name: Create directory for PGDG key
+      ansible.builtin.file:
+        path: "/usr/share/postgresql-common/pgdg"
+        state: directory
+        mode: "0755"
+
+    - name: Download PostgreSQL APT repository signing key
+      ansible.builtin.get_url:
+        url: "{{ pgdg_key_url }}"
+        dest: "{{ pgdg_key_path }}"
+        mode: "0644"
+        timeout: 30
+      register: key_download
+      until: key_download is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Get OS release codename
+      ansible.builtin.shell: . /etc/os-release && echo "$VERSION_CODENAME"
+      register: os_codename
+      changed_when: false
+
+    - name: Add PostgreSQL APT repository configuration
+      ansible.builtin.lineinfile:
+        path: "{{ pgdg_list_path }}"
+        line: "deb [signed-by={{ pgdg_key_path }}] https://apt.postgresql.org/pub/repos/apt {{ os_codename.stdout }}-pgdg main"
+        create: yes
+        state: present
+      notify: Update APT cache
+
+    - name: Install PostgreSQL {{ postgresql_version }}
+      ansible.builtin.apt:
+        name: "postgresql-{{ postgresql_version }}"
+        state: present
+        install_recommends: no
+      notify: Start and enable postgresql service
+
+  handlers:
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+      listen: Update APT cache
+
+    - name: Stop and disable postgresql service (if running)
+      ansible.builtin.service:
+        name: postgresql
+        state: stopped
+        enabled: no
+      failed_when: false
+
+    - name: Start and enable postgresql service
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: yes
