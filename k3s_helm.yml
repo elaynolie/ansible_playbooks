@@ -1,0 +1,99 @@
+---
+- name: Install K3s and Helm
+  hosts: localhost
+  become: true
+
+  vars:
+    k3s_version: "v1.33.3+k3s1"
+    k3s_bin: /usr/local/bin/k3s
+    k3s_install_script: /usr/local/bin/k3s-install.sh
+    helm_apt_key_id: "DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6"
+    helm_key_tmp: /tmp/helm.gpg
+    helm_keyring: /usr/share/keyrings/helm.gpg
+
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - htop
+          - vim
+          - git
+          - curl
+          - gpg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    # ---------- Helm ----------
+    - name: Download Helm APT key
+      ansible.builtin.get_url:
+        url: https://packages.buildkite.com/helm-linux/helm-debian/gpgkey
+        dest: "{{ helm_key_tmp }}"
+        mode: "0644"
+
+    - name: Get Helm APT key fingerprint
+      ansible.builtin.shell: >
+        set -o pipefail &&
+        gpg --show-keys --with-colons {{ helm_key_tmp }}
+        | awk -F: '$1 == "fpr" {print $10}' | head -n 1
+      args:
+        executable: /bin/bash
+      register: helm_key_fpr
+      changed_when: false
+
+    - name: Verify Helm APT key fingerprint
+      ansible.builtin.assert:
+        that: helm_key_fpr.stdout == helm_apt_key_id
+        fail_msg: "Unexpected Helm APT key ID: potential key compromise"
+
+    - name: Dearmor Helm key into keyring
+      ansible.builtin.command:
+        cmd: "gpg --dearmor -o {{ helm_keyring }} {{ helm_key_tmp }}"
+        creates: "{{ helm_keyring }}"
+
+    - name: Add Helm APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by={{ helm_keyring }}] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main"
+        filename: helm-stable-debian
+        state: present
+        update_cache: true
+
+    - name: Install Helm
+      ansible.builtin.apt:
+        name: helm
+        state: present
+
+    # ---------- K3S ----------
+    - name: Download k3s binary
+      ansible.builtin.get_url:
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | replace('+', '%2B') }}/k3s"
+        dest: "{{ k3s_bin }}"
+        mode: "0755"
+
+    - name: Download k3s install script from official source
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: "{{ k3s_install_script }}"
+        mode: "0755"
+
+    - name: Run k3s install script (binary already in place)
+      ansible.builtin.command:
+        cmd: "{{ k3s_install_script }}"
+      environment:
+        INSTALL_K3S_SKIP_DOWNLOAD: "true"
+      args:
+        creates: /etc/systemd/system/k3s.service
+
+    - name: Ensure k3s is started and enabled
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for node to become Ready
+      ansible.builtin.command: k3s kubectl get nodes
+      register: k3s_nodes
+      until: "'Ready' in k3s_nodes.stdout and 'NotReady' not in k3s_nodes.stdout"
+      retries: 20
+      delay: 5
+      changed_when: false
